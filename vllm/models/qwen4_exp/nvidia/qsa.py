@@ -100,8 +100,18 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     ) -> str | None:
         # The parent rejects quantized-KV combinations whose FA kernel is
         # unavailable ("FP8 KV cache requires FA3 on SM90 or FA4 on
-        # SM100").  QSA never runs flash-attn over this cache, so accept
-        # every combination the validator hands us.
+        # SM100").  QSA never runs flash-attn over this cache, so the FA
+        # availability itself does not gate us.  The fp8 QSA path is only
+        # validated on SM89+ (GPUs with native fp8 support); on older
+        # devices keep rejecting fp8 KV instead of silently taking an
+        # unvalidated dequant path.
+        if kv_cache_dtype in ("fp8", "fp8_e4m3") and device_capability < DeviceCapability(
+            major=8, minor=9
+        ):
+            return (
+                "Qwen4Exp QSA fp8 KV cache requires device capability >= 8.9; "
+                "older GPUs must keep a BF16 main KV cache"
+            )
         return None
 
     @staticmethod
@@ -166,6 +176,17 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
             )  # FP8KV-PORT:qsa-impl-guard
+        # FP8KV-PORT:qsa-impl-arch-guard -- runtime backstop mirroring
+        # supports_combination: SM89+ has native fp8 support and is the only
+        # validated target; older GPUs (SM80/SM86) keep the BF16 requirement.
+        if self.kv_cache_dtype in ("fp8", "fp8_e4m3") and (
+            current_platform.get_device_capability() is None
+            or current_platform.get_device_capability()
+            < DeviceCapability(major=8, minor=9)
+        ):
+            raise NotImplementedError(
+                "Qwen4Exp QSA fp8 KV cache requires device capability >= 8.9"
+            )  # FP8KV-PORT:qsa-impl-arch-guard
         self.supports_quant_query_input = False
 
     def forward_qsa(
